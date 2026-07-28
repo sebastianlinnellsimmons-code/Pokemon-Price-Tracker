@@ -1,9 +1,21 @@
+# Save this file as .github/workflows/build_price_dataset.yml in your repo.
+#
+# Setup (one-time):
+#   1. Create a GitHub repo and push build_price_dataset.py to it.
+#   2. In the repo: Settings -> Secrets and variables -> Actions -> New repository secret
+#        Name:  POKEMONTCG_API_KEY
+#        Value: (your key — rotate it first if it's ever been shared in plaintext)
+#   3. Commit this file at .github/workflows/build_price_dataset.yml
+#
+# After that, it runs automatically every day and commits the growing
+# prices_store.csv back into the repo — no computer needs to be left on.
+
 name: Build Pokemon Price Dataset
 
 on:
   schedule:
-    - cron: "0 6 * * *"
-  workflow_dispatch:
+    - cron: "0 6 * * *"   # 6:00 UTC daily — adjust to your preferred time
+  workflow_dispatch:        # lets you also trigger it manually from the Actions tab
 
 jobs:
   fetch:
@@ -18,15 +30,24 @@ jobs:
       - name: Install dependencies
         run: pip install requests pandas numpy
 
+      - name: Confirm dependencies installed correctly
+        run: |
+          python -c "
+          import requests, pandas, numpy
+          print('requests', requests.__version__)
+          print('pandas', pandas.__version__)
+          print('numpy', numpy.__version__)
+          "
+
       - name: Run fetch
         env:
           POKEMONTCG_API_KEY: ${{ secrets.POKEMONTCG_API_KEY }}
-        run: python build_price_dataset.py --store prices_store.csv
+        run: python build_price_dataset.py --store prices_wide_store.csv
 
       - name: Commit updated dataset
         run: |
           git config user.name "price-dataset-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add prices_store.csv
+          git add prices_wide_store.csv
           git diff --staged --quiet || git commit -m "Add price snapshot for $(date -u +%Y-%m-%d)"
           git push
