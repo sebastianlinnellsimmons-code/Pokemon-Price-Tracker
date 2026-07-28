@@ -1,0 +1,32 @@
+name: Build Pokemon Price Dataset
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pandas numpy
+
+      - name: Run fetch
+        env:
+          POKEMONTCG_API_KEY: ${{ secrets.POKEMONTCG_API_KEY }}
+        run: python build_price_dataset.py --store prices_store.csv
+
+      - name: Commit updated dataset
+        run: |
+          git config user.name "price-dataset-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add prices_store.csv
+          git diff --staged --quiet || git commit -m "Add price snapshot for $(date -u +%Y-%m-%d)"
+          git push
