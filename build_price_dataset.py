@@ -57,7 +57,7 @@ FALLBACK_EUR_USD_RATE = 1.08  # rough long-run approximate; only used if the liv
 COLUMN_ORDER = [
     "card_id", "name", "variant", "set", "rarity", "artist", "subtype",
     "national_dex_numbers", "supertype", "release_date", "price_source",
-    "purchase_url",
+    "purchase_url", "image_url", "tcgplayer_updated_at", "cardmarket_updated_at",
     "tcgplayer_market", "tcgplayer_low", "tcgplayer_mid", "tcgplayer_high",
     "tcgplayer_holofoil_market", "tcgplayer_reverse_holofoil_market",
     "tcgplayer_1st_edition_normal_market", "tcgplayer_1st_edition_holofoil_market",
@@ -143,7 +143,24 @@ def fetch_all_cards(api_key: str, page_size: int = 250, max_retries: int = 5):
                 time.sleep(wait)
                 continue
 
-            resp.raise_for_status()
+            if resp.status_code == 404:
+                # A 404 after we've already succeeded on earlier pages most
+                # likely means we've paginated past the real end of the card
+                # list (some APIs 404 an out-of-range page instead of
+                # returning an empty list) - this is expected, not a failure.
+                # But rule out a one-off transient blip first with a single
+                # short retry before treating it as the definitive end,
+                # since silently stopping pagination early on a genuine
+                # transient error would quietly truncate the day's dataset.
+                if attempt == 0:
+                    print(f"HTTP 404 on page {page} - retrying once to rule out a transient blip.", file=sys.stderr)
+                    time.sleep(1)
+                    continue
+                print(f"HTTP 404 on page {page} persisted - treating as the end of available pages.", file=sys.stderr)
+                page_data = []
+                break
+
+            resp.raise_for_status()  # any other 4xx (bad key, bad params) is a real problem - surface it
             page_data = resp.json().get("data", [])
             break
         else:
@@ -209,6 +226,10 @@ def flatten_snapshot(cards, snapshot_date: str, eur_usd_rate: float) -> pd.DataF
         # --- purchase URL: prefer tcgplayer's, fall back to cardmarket's ---
         purchase_url = tcg.get("url") or cm.get("url")
 
+        # --- card image: prefer high-res, fall back to the small thumbnail ---
+        images = card.get("images") or {}
+        image_url = images.get("large") or images.get("small")
+
         # --- list-type fields -> pipe-joined strings (CSV-safe) ---
         subtypes = card.get("subtypes") or []
         dex_numbers = card.get("nationalPokedexNumbers") or []
@@ -226,6 +247,13 @@ def flatten_snapshot(cards, snapshot_date: str, eur_usd_rate: float) -> pd.DataF
             "release_date": set_info.get("releaseDate"),
             "price_source": price_source,
             "purchase_url": purchase_url,
+            "image_url": image_url,
+            # the source's own "when was this price last refreshed" timestamp -
+            # NOT the same as `date` below, which is just the day WE happened
+            # to fetch it. A price can sit unchanged for days between the
+            # source's own updates even though we pull a snapshot daily.
+            "tcgplayer_updated_at": tcg.get("updatedAt"),
+            "cardmarket_updated_at": cm.get("updatedAt"),
 
             "tcgplayer_market": primary.get("market"),
             "tcgplayer_low": primary.get("low"),
@@ -276,11 +304,17 @@ def flatten_snapshot(cards, snapshot_date: str, eur_usd_rate: float) -> pd.DataF
 # ---------------------------------------------------------------------------
 # IDEMPOTENCY + ATOMIC WRITE (same pattern as before)
 # ---------------------------------------------------------------------------
+# ENCODING NOTE: "utf-8-sig" writes a BOM (byte-order marker) at the start of
+# the file. Plain "utf-8" is technically correct, but Excel on Windows
+# ignores the file's actual encoding and guesses ANSI/Windows-1252 unless a
+# BOM tells it otherwise - that's exactly what produced "PokÃ©mon" instead
+# of "Pokémon". The BOM costs nothing for pandas/Python, which handle it
+# transparently, but fixes the display in Excel.
 def already_fetched_today(store_path: str, snapshot_date: str) -> bool:
     if not os.path.exists(store_path):
         return False
     try:
-        dates = pd.read_csv(store_path, usecols=["date"])["date"]
+        dates = pd.read_csv(store_path, usecols=["date"], encoding="utf-8-sig")["date"]
     except (ValueError, pd.errors.EmptyDataError):
         return False
     return snapshot_date in dates.astype(str).values
@@ -289,12 +323,12 @@ def already_fetched_today(store_path: str, snapshot_date: str) -> bool:
 def atomic_append(new_rows: pd.DataFrame, store_path: str):
     tmp_path = store_path + ".tmp"
     if os.path.exists(store_path):
-        existing = pd.read_csv(store_path)
+        existing = pd.read_csv(store_path, encoding="utf-8-sig")
         combined = pd.concat([existing, new_rows], ignore_index=True)
     else:
         combined = new_rows
     combined = combined.reindex(columns=COLUMN_ORDER)
-    combined.to_csv(tmp_path, index=False)
+    combined.to_csv(tmp_path, index=False, encoding="utf-8-sig")
     os.replace(tmp_path, store_path)
 
 
