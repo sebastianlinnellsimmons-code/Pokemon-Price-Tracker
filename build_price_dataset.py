@@ -55,7 +55,7 @@ FX_API = "https://api.frankfurter.app/latest"
 FALLBACK_EUR_USD_RATE = 1.08  # rough long-run approximate; only used if the live lookup fails
 
 COLUMN_ORDER = [
-    "card_id", "name", "variant", "set", "rarity", "artist", "subtype",
+    "card_id", "name", "variant", "set", "card_number", "rarity", "artist", "subtype",
     "national_dex_numbers", "supertype", "release_date", "price_source",
     "purchase_url", "image_url", "tcgplayer_updated_at", "cardmarket_updated_at",
     "tcgplayer_market", "tcgplayer_low", "tcgplayer_mid", "tcgplayer_high",
@@ -239,6 +239,11 @@ def flatten_snapshot(cards, snapshot_date: str, eur_usd_rate: float) -> pd.DataF
             "name": card.get("name"),
             "variant": primary_key,  # which price group backs Market/Low/Mid/High below
             "set": set_info.get("name"),
+            # the card's printed number within its set (e.g. "4" in a
+            # 102-card set, or "TG01" for special subsets like Trainer
+            # Gallery) - kept as a string since it isn't always purely
+            # numeric; sorting logic in the app handles that
+            "card_number": card.get("number"),
             "rarity": card.get("rarity"),
             "artist": card.get("artist"),
             "subtype": "|".join(subtypes) if subtypes else None,
