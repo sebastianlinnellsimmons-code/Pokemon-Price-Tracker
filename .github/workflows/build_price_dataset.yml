@@ -7,8 +7,9 @@
 #        Value: (your key — rotate it first if it's ever been shared in plaintext)
 #   3. Commit this file at .github/workflows/build_price_dataset.yml
 #
-# After that, it runs automatically every day and commits the growing
-# prices_store.csv back into the repo — no computer needs to be left on.
+# After that, it runs automatically every day and commits ONE small new file
+# per day into data/daily/ — no computer needs to be left on, and no single
+# file ever grows large enough to hit GitHub's 100MB-per-file limit.
 
 name: Build Pokemon Price Dataset
 
@@ -42,12 +43,12 @@ jobs:
       - name: Run fetch
         env:
           POKEMONTCG_API_KEY: ${{ secrets.POKEMONTCG_API_KEY }}
-        run: python build_price_dataset.py --store prices_wide_store.csv
+        run: python build_price_dataset.py --data-dir data/daily
 
       - name: Commit updated dataset
         run: |
           git config user.name "price-dataset-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add prices_wide_store.csv
+          git add data/daily/
           git diff --staged --quiet || git commit -m "Add price snapshot for $(date -u +%Y-%m-%d)"
           git push
