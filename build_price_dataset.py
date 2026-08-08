@@ -40,6 +40,7 @@ snapshot already exists and skips instead of duplicating rows.
 """
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -307,34 +308,56 @@ def flatten_snapshot(cards, snapshot_date: str, eur_usd_rate: float) -> pd.DataF
 
 
 # ---------------------------------------------------------------------------
-# IDEMPOTENCY + ATOMIC WRITE (same pattern as before)
+# DAILY FILE PARTITIONING
 # ---------------------------------------------------------------------------
-# ENCODING NOTE: "utf-8-sig" writes a BOM (byte-order marker) at the start of
-# the file. Plain "utf-8" is technically correct, but Excel on Windows
+# One file per day (data/daily/2026-08-08.csv) instead of one ever-growing
+# file. Two problems this solves:
+#   1. GitHub rejects any single file over 100MB. A single accumulating file
+#      grows without bound and WILL eventually hit that wall (it already
+#      has) - a daily file only ever holds one day's worth of rows, so it
+#      never grows past roughly the same size no matter how long the
+#      dataset has been running.
+#   2. The old atomic_append had to read the ENTIRE historical file into
+#      memory and rewrite it from scratch every single day just to add one
+#      day's rows - that gets slower and heavier forever. Writing a
+#      standalone daily file needs no read of prior history at all.
+#
+# ENCODING NOTE: "utf-8-sig" writes a BOM (byte-order marker) at the start
+# of the file. Plain "utf-8" is technically correct, but Excel on Windows
 # ignores the file's actual encoding and guesses ANSI/Windows-1252 unless a
-# BOM tells it otherwise - that's exactly what produced "PokÃ©mon" instead
-# of "Pokémon". The BOM costs nothing for pandas/Python, which handle it
-# transparently, but fixes the display in Excel.
-def already_fetched_today(store_path: str, snapshot_date: str) -> bool:
-    if not os.path.exists(store_path):
-        return False
-    try:
-        dates = pd.read_csv(store_path, usecols=["date"], encoding="utf-8-sig")["date"]
-    except (ValueError, pd.errors.EmptyDataError):
-        return False
-    return snapshot_date in dates.astype(str).values
+# BOM tells it otherwise - that's what produced "PokÃ©mon" instead of
+# "Pokémon" earlier. The BOM costs nothing for pandas/Python, which handle
+# it transparently, but fixes the display in Excel.
+def daily_file_path(data_dir: str, snapshot_date: str) -> str:
+    return os.path.join(data_dir, f"{snapshot_date}.csv")
 
 
-def atomic_append(new_rows: pd.DataFrame, store_path: str):
-    tmp_path = store_path + ".tmp"
-    if os.path.exists(store_path):
-        existing = pd.read_csv(store_path, encoding="utf-8-sig")
-        combined = pd.concat([existing, new_rows], ignore_index=True)
-    else:
-        combined = new_rows
-    combined = combined.reindex(columns=COLUMN_ORDER)
-    combined.to_csv(tmp_path, index=False, encoding="utf-8-sig")
-    os.replace(tmp_path, store_path)
+def already_fetched_today(data_dir: str, snapshot_date: str) -> bool:
+    return os.path.exists(daily_file_path(data_dir, snapshot_date))
+
+
+def write_daily_snapshot(new_rows: pd.DataFrame, data_dir: str, snapshot_date: str):
+    os.makedirs(data_dir, exist_ok=True)
+    final_path = daily_file_path(data_dir, snapshot_date)
+    tmp_path = final_path + ".tmp"
+    new_rows = new_rows.reindex(columns=COLUMN_ORDER)
+    new_rows.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+    os.replace(tmp_path, final_path)  # atomic on POSIX and Windows
+    return final_path
+
+
+def load_all_snapshots(data_dir: str) -> pd.DataFrame:
+    """
+    Reads every daily file and concatenates them into one dataframe -
+    the equivalent of what used to be a single pd.read_csv(STORE_PATH)
+    call, now spread across many small files. Used by the Streamlit app,
+    the LSTM pipeline, and the training notebook.
+    """
+    paths = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
+    if not paths:
+        raise FileNotFoundError(f"No daily snapshot files found in {data_dir}")
+    frames = [pd.read_csv(p, encoding="utf-8-sig", low_memory=False) for p in paths]
+    return pd.concat(frames, ignore_index=True)
 
 
 def main():
@@ -343,7 +366,7 @@ def main():
         "--api-key", default=os.environ.get("POKEMONTCG_API_KEY"),
         help="Defaults to the POKEMONTCG_API_KEY env var.",
     )
-    parser.add_argument("--store", default="prices_wide_store.csv", help="Path to the accumulating CSV store")
+    parser.add_argument("--data-dir", default="data/daily", help="Directory holding one CSV per day")
     parser.add_argument("--flush-every", type=int, default=500, help="Cards buffered per flatten batch")
     args = parser.parse_args()
 
@@ -355,8 +378,8 @@ def main():
 
     snapshot_date = date.today().isoformat()
 
-    if already_fetched_today(args.store, snapshot_date):
-        print(f"Already have a snapshot for {snapshot_date} in {args.store}. Skipping.")
+    if already_fetched_today(args.data_dir, snapshot_date):
+        print(f"Already have a snapshot for {snapshot_date} in {args.data_dir}. Skipping.")
         return
 
     eur_usd_rate = get_eur_usd_rate()
@@ -379,8 +402,8 @@ def main():
         return
 
     new_rows = pd.concat(non_empty, ignore_index=True)
-    atomic_append(new_rows, args.store)
-    print(f"Fetched {total_cards} cards, wrote {len(new_rows)} rows for {snapshot_date} to {args.store}")
+    written_path = write_daily_snapshot(new_rows, args.data_dir, snapshot_date)
+    print(f"Fetched {total_cards} cards, wrote {len(new_rows)} rows for {snapshot_date} to {written_path}")
 
 
 if __name__ == "__main__":
@@ -391,6 +414,6 @@ if __name__ == "__main__":
 # SCHEDULING OPTIONS (pick one)
 # ---------------------------------------------------------------------------
 # Option A - cron (Mac/Linux):
-#   0 6 * * * cd /path/to/project && POKEMONTCG_API_KEY=yourkey python3 build_price_dataset.py --store prices_wide_store.csv >> fetch.log 2>&1
+#   0 6 * * * cd /path/to/project && POKEMONTCG_API_KEY=yourkey python3 build_price_dataset.py --data-dir data/daily >> fetch.log 2>&1
 # Option B - Windows Task Scheduler: Daily trigger -> python.exe with the same arguments.
 # Option C - GitHub Actions: see build_price_dataset_workflow.yml.
